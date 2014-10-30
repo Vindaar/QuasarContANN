@@ -196,6 +196,8 @@ class LogisticRegression(object):
             ind  = T.arange(y.shape[0])
             #n_below = [0. if T.le((self.y_pred[j] - y[j])**2, threshold) else 1. for j in ind]
             #n_below = []
+            # TODO: figure out in how far this calculation is correct AND whether axis=1 is the 
+            # correct axis!
             n_below = T.mean(T.le((self.y_pred[ind] - y[ind])**2, threshold), axis=1)
 
             # for j in ind:

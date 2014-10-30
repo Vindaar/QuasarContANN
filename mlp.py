@@ -32,136 +32,8 @@ import numpy
 
 import theano
 import theano.tensor as T
-
-#import numpy as np
-import fitsio
-from SDSSmodules.SDSSfiles import *
-from SDSSmodules.SDSSclasses import *
-from congrid import rebin_1d, get_arrays
-
+from handle_data import load_SDSS_data
 from logistic_sgd import LogisticRegression, load_data
-
-
-def get_flux_arrays(files):
-
-    #files = open('../../dr9list.lis', 'r').readlines()
-
-    spec = spectrum()
-
-    flux = []
-    flux_error = []
-    model_sdss = []
-    size = []
-    wave = []
-    nspec = len(files)
-    print nspec
-
-    for i in xrange(nspec):
-        read_speclya_fitsio(files[i], spec)
-        wave_temp = spec.wave / (spec.z + 1.0)
-        lya_low = 1041#*(spec.z + 1.0)
-        lya_up  = 1185#*(spec.z + 1.0)
-        # index = numpy.where((spec.flux_error > 0) &
-        #                  (spec.wave > lya_low) &
-        #                  (spec.wave < lya_up ) &
-        #                  (spec.mask_comb == 0))[0]
-        index = numpy.where((wave_temp > lya_low) &
-                         (wave_temp < lya_up ))[0]
-        size.append(numpy.size(index))
-        flux.append(spec.flux[index])
-        flux_error.append(spec.flux_error[index])
-        model_sdss.append(spec.model_sdss[index])
-        wave.append(wave_temp[index])
-
-    max_size = int(max(size))
-    for i in xrange(nspec):
-        flux[i] = rebin_1d(flux[i], max_size, method='spline')
-        wave[i] = rebin_1d(wave[i], max_size, method='spline')
-        model_sdss[i] = rebin_1d(model_sdss[i], max_size, method='spline')
-        print numpy.shape(flux[i])
-
-    flux = numpy.asarray(flux)
-    flux_error = numpy.asarray(flux_error)
-    wave = numpy.asarray(wave)
-    model_sdss = numpy.asarray(model_sdss)
-    min_size = int(min(size))
-    flux_ar = numpy.empty((min_size, nspec))    
-    model_ar = numpy.empty((min_size, nspec))
-
-    return flux, model_sdss, wave, max_size
-
-def load_SDSS_data(args, nspec=1000):
-    ''' Loads the dataset
-
-    :type dataset: string
-    :param dataset: the path to the dataset (here MNIST)
-    '''
-
-    #############
-    # LOAD DATA #
-    #############
-
-    print '... loading data'
-
-    # Load the dataset
-    # Load spectra as a data set. Train, validate and test
-    spectra_f = open(args[0], 'r').readlines()
-    train_set_x, train_set_y, wave_train, size_train = get_flux_arrays(spectra_f[0:nspec])
-    valid_set_x, valid_set_y, wave_valid, size_valid = get_flux_arrays(spectra_f[nspec + 1 : 2 * nspec + 1])
-    test_set_x, test_set_y,   wave_test,  size_test  = get_flux_arrays(spectra_f[nspec * 2 + 2 : 3*nspec + 2])    
-    print numpy.shape(train_set_x), numpy.shape(train_set_y)
-    train_set = [train_set_x, train_set_y]
-    valid_set = [valid_set_x, valid_set_y]
-    test_set = [test_set_x, test_set_y]
-
-    #input is an numpy.ndarray of 2 dimensions (a matrix)
-    #witch row's correspond to an example. target is a
-    #numpy.ndarray of 1 dimensions (vector)) that have the same length as
-    #the number of rows in the input. It should give the target
-    #target to the example with the same index in the input.
-
-    def shared_dataset(data_xy, borrow=True):
-        """ Function that loads the dataset into shared variables
-
-        The reason we store our dataset in shared variables is to allow
-        Theano to copy it into the GPU memory (when code is run on GPU).
-        Since copying data into the GPU is slow, copying a minibatch everytime
-        is needed (the default behaviour if the data is not in a shared
-        variable) would lead to a large decrease in performance.
-        """
-        data_x, data_y = data_xy
-        shared_x = theano.shared(numpy.asarray(data_x,
-                                               dtype=theano.config.floatX),
-                                 borrow=borrow)
-        shared_y = theano.shared(numpy.asarray(data_y,
-                                               dtype=theano.config.floatX),
-                                 borrow=borrow)
-        # When storing data on the GPU it has to be stored as floats
-        # therefore we will store the labels as ``floatX`` as well
-        # (``shared_y`` does exactly that). But during our computations
-        # we need them as ints (we use labels as index, and if they are
-        # floats it doesn't make sense) therefore instead of returning
-        # ``shared_y`` we will have to cast it to int. This little hack
-        # lets ous get around this issue
-        # basti: need floats, since we want to do regression
-        return shared_x, shared_y#T.cast(shared_y, 'int32')
-
-    test_set_x, test_set_y = shared_dataset(test_set)
-    valid_set_x, valid_set_y = shared_dataset(valid_set)
-    train_set_x, train_set_y = shared_dataset(train_set)
-
-    rval = [(train_set_x, train_set_y), (valid_set_x, valid_set_y),
-            (test_set_x, test_set_y)]
-
-    if size_train == size_valid == size_test:
-        print 'all sizes are the same. Continue.'
-    else:
-        print 'Error: Sizes of train, valid and test are not the same.'
-        import sys
-        sys.exit()
-
-    return rval, size_train
-
 
 # start-snippet-1
 class HiddenLayer(object):
@@ -280,46 +152,84 @@ class MLP(object):
         10 input neurons, 2 hidden layers with 5 neurons each, 15 output neurons
 
         """
+        # check if we use a specfic layout:
+        if ann_layout is not None:
+            # n_on_hid_layers is an array of ints, containing the number of neurons on each hidden
+            # layer
+            # n_hid_layers is the number of hidden layers we have
+            n_in = ann_layout[0]
+            n_out = ann_layout[-1]
+            n_on_hid_layer = ann_layout[:-1]
+            n_hid_layers = numpy.size(n_on_hid_layer)
+            self.hiddenLayer = []
+        else:
+            n_on_hid_layer = list(n_hidden)
+            n_hid_layers = 2
 
         # if layer_params not None, we load a network configuration
         if layer_params is not None:
-            W_hid, b_hid = layer_params[0]
-            W_logR, b_logR = layer_params[1]
+            # if we load a network, the number of elements in layer_params - 1 is the number of
+            # hidden layers in that network
+            W_hid = []
+            b_hid = []
+            for layer in layer_params:
+                W_hid_temp, b_hid_temp = layer
+                W_hid.append(W_hid_temp)
+                b_hid.append(b_hid_temp)
+            W_logR = W_hid[-1]
+            b_logR = b_hid[-1]
+            W_hid  = numpy.asarray(W_hid[:-1])
+            b_hid  = numpy.asarray(b_hid[:-1])
         else:
-            W_hid=None
-            b_hid=None
+            W_hid=[None for _ in xrange(n_hid_layers)]
+            b_hid=[None for _ in xrange(n_hid_layers)]
             W_logR=None
             b_logR=None
-
-        # check if we use a specfic layout:
-        if ann_layout is not None:
-            # n_hid_layers is an array of ints, containing the number of neurons on each hidden
-            # layer
-            n_in = ann_layout[0]
-            n_out = ann_layout[-1]
-            n_hid_layers = ann_layout[1:-2]
-            n_hid = numpy.size(n_hidden)
 
         # Since we are dealing with a one hidden layer MLP, this will translate
         # into a HiddenLayer with a tanh activation function connected to the
         # LogisticRegression layer; the activation function can be replaced by
         # sigmoid or any other nonlinear function
-        for n_hid in n_
-        self.hiddenLayer = HiddenLayer(
-            rng=rng,
-            input=input,
-            n_in=n_in,
-            n_out=n_hidden,
-            activation=T.tanh,
-            W=W_hid,
-            b=b_hid
-        )
+        # now several layers. 1st hidden:
+        # self.hiddenLayerIn = HiddenLayer(
+        #     rng=rng,
+        #     input=input,
+        #     n_in=n_in,
+        #     n_out=n_on_hid_layers[0],
+        #     activation=T.tanh,
+        #     W=W_hid[0],
+        #     b=b_hid[0]
+        # )
 
+        # create several more hidden layers:
+        for i in xrange(n_hid_layers - 1):
+            # for i == 0 n_on_hid_layer contains the number of input neurons
+            n_input   = n_on_hid_layer[i]
+            n_output  = n_on_hid_layer[i+1]
+            print 'neurons on layer', i
+            print n_input, n_output
+            if i == 0:
+                layer_input = input
+            else:
+                layer_input = self.hiddenLayer[i-1].output
+            self.hiddenLayer.append(
+                HiddenLayer(
+                rng=rng,
+                input=layer_input,
+                n_in=n_input,
+                n_out=n_output,
+                activation=T.tanh,
+                W=W_hid[i],
+                b=b_hid[i]
+            ))
+
+        print 'neurons on layer out'
+        print n_on_hid_layer[-1], n_out
         # The logistic regression layer gets as input the hidden units
         # of the hidden layer
         self.logRegressionLayer = LogisticRegression(
-            input=self.hiddenLayer.output,
-            n_in=n_hidden,
+            input=self.hiddenLayer[-1].output,
+            n_in=n_on_hid_layer[-1],
             n_out=n_out,
             W=W_logR,
             b=b_logR
@@ -327,15 +237,23 @@ class MLP(object):
         # end-snippet-2 start-snippet-3
         # L1 norm ; one regularization option is to enforce L1 norm to
         # be small
+        # To calculate L1 and L2, we need the absolute value of the sum of
+        # all weights in all layers:
+        W_sum  = 0
+        W2_sum = 0
+        for layer in self.hiddenLayer:
+            W_sum  += abs(layer.W).sum()
+            W2_sum += (layer.W ** 2).sum()
+
         self.L1 = (
-            abs(self.hiddenLayer.W).sum()
+            W_sum
             + abs(self.logRegressionLayer.W).sum()
         )
 
         # square of L2 norm ; one regularization option is to enforce
         # square of L2 norm to be small
         self.L2_sqr = (
-            (self.hiddenLayer.W ** 2).sum()
+            W2_sum
             + (self.logRegressionLayer.W ** 2).sum()
         )
 
@@ -353,8 +271,18 @@ class MLP(object):
 
         # the parameters of the model are the parameters of the two layer it is
         # made out of
-        self.params = self.hiddenLayer.params + self.logRegressionLayer.params
-        self.layer_params = [self.hiddenLayer.params, self.logRegressionLayer.params]
+        # create the self.params and layer_params from all hidden layers
+        hiddenLayerParams = []
+        hiddenLayerParamsTuple = []
+        for layer in self.hiddenLayer:
+            hiddenLayerParams += layer.params
+            hiddenLayerParamsTuple.append(layer.params)
+        hiddenLayerParamsTuple.append(self.logRegressionLayer.params)
+
+        self.params = hiddenLayerParams  + self.logRegressionLayer.params
+        self.layer_params = hiddenLayerParamsTuple
+        print 'params'
+        print self.params, self.layer_params
         # end-snippet-3
 
 
@@ -363,29 +291,7 @@ class MLP(object):
         # input = flux of spectrum
         # out = prediction
 
-        
-        
-
-
-    # def cost(self, y):
-    #     # function to calculate the cost of the MLP Regressor based on the expected value
-    #     # y
-    #     # get output from LogisticRegression classifier by 
-    #     output = self.logRegressionLayer.p_y_given_x
-    #     # TODO: find out how to look at shape of output and y
-    #     # then adjust such that we calculate:
-    #     # take row of y corresponding to training sample 
-    #     # subtract output from y
-    #     # sum over squares
-    #     print y.shape
-    #     print output.shape
-
-    #     cost_val  = T.sum((y - output)**2, axis=None)
-    #     #cost_val   = error * error
-    #     return cost_val
-
-
-def test_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000,
+def test_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=500,
              dataset='mnist.pkl.gz', batch_size=20, n_hidden=500):
     """
     Demonstrate stochastic gradient descent optimization for a multilayer
@@ -414,28 +320,16 @@ def test_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000
 
 
    """
+
+    # Load spectra as a data set. Train, validate and test
     #datasets = load_data(dataset)
-    datasets, size = load_SDSS_data(args, 50)
+    datasets, size = load_SDSS_data(args, 100)
 
     train_set_x, train_set_y = datasets[0]
     valid_set_x, valid_set_y = datasets[1]
     test_set_x, test_set_y = datasets[2]
     print test_set_x
     print test_set_y
-    #print datasets[0]
-
-    # # Load spectra as a data set. Train, validate and test
-    # spectra_f = open(args[0], 'r').readlines()
-    # train_set_x, train_set_y, wave_train, size_train = get_flux_arrays(spectra_f[0:30])
-    # valid_set_x, valid_set_y, wave_valid, size_valid = get_flux_arrays(spectra_f[100:130])
-    # test_set_x, test_set_y,   wave_test,  size_test  = get_flux_arrays(spectra_f[5000:5030])
-
-    # if size_train == size_valid == size_test:
-    #     print 'yay, we can continue'
-    # else:
-    #     print 'Error: train, valid and test arrays do not have the same sizes'
-    #     import sys
-    #     sys.exit()
 
     # compute number of minibatches for training, validation and testing
     n_train_batches = train_set_x.get_value(borrow=True).shape[0] / batch_size
@@ -458,14 +352,16 @@ def test_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000
     rng = numpy.random.RandomState(1234)
 
     # construct the MLP class
+    #mlp_layout = [size, n_hidden, size]
+    mlp_layout = [size, 400, 1200, 400, size]
     classifier = MLP(
         rng=rng,
         input=x,
         n_in=size,
         n_hidden=n_hidden,
-        n_out=size
+        n_out=size,
+        ann_layout=mlp_layout
     )
-    mlp_layout = [size, n_hidden, size]
 
     # start-snippet-4
     # the cost we minimize during training is the negative log likelihood of
@@ -486,13 +382,13 @@ def test_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000
     
     # end-snippet-4
 
-    print 'f', test_set_y[0].shape[1]
+    print 'f', test_set_y[0].shape[1]#, test_set_y[0].eval()
 
     # compiling a Theano function that computes the mistakes that are made
     # by the model on a minibatch
     test_model = theano.function(
         inputs=[index],
-        outputs=classifier.errors(y, threshold=0.01),
+        outputs=classifier.errors(y, threshold=0.001),
         givens={
             x: test_set_x[index * batch_size:(index + 1) * batch_size],
             y: test_set_y[index * batch_size:(index + 1) * batch_size]
@@ -501,7 +397,7 @@ def test_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000
 
     validate_model = theano.function(
         inputs=[index],
-        outputs=classifier.errors(y, threshold=0.01),
+        outputs=classifier.errors(y, threshold=0.001),
         givens={
             x: valid_set_x[index * batch_size:(index + 1) * batch_size],
             y: valid_set_y[index * batch_size:(index + 1) * batch_size]
@@ -600,6 +496,7 @@ def test_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000
 
                     best_validation_loss = this_validation_loss
                     best_iter = iter
+                    best_params = classifier.layer_params
 
                     # test it on the test set
                     test_losses = [test_model(i) for i
@@ -626,10 +523,19 @@ def test_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000
 
     # cPickle classifier (better to pickle weights only!)
     # to use in predicting and plotting script
+    # first cPickle final model
     save_file = open('classifier_params.mlp', 'wb')
     cPickle.dump(classifier.layer_params, save_file, -1)
     cPickle.dump(mlp_layout, save_file, -1)
     save_file.close()
+    # now pickle model with best parameters
+    save_file = open('classifier_best_params.mlp', 'wb')
+    cPickle.dump(best_params, save_file, -1)
+    cPickle.dump(mlp_layout, save_file, -1)
+    save_file.close()
+
+
+
     
 
 if __name__ == '__main__':
