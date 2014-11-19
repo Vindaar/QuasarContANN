@@ -186,7 +186,6 @@ class LogisticRegression(object):
         if y.dtype.startswith('int'):
             # the T.neq operator returns a vector of 0s and 1s, where 1
             # represents a mistake in prediction
-            print 'blub'
             return T.mean(T.neq(self.y_pred, y))
         elif y.dtype.startswith('float'):
             # in case of regression errors should return the number of outputs
@@ -198,16 +197,15 @@ class LogisticRegression(object):
             #n_below = []
             # TODO: figure out in how far this calculation is correct AND whether axis=1 is the 
             # correct axis!
-            n_below = T.mean(T.le((self.y_pred[ind] - y[ind])**2, threshold), axis=1)
+            n_below = T.mean(T.le((self.y_pred - y)**2, threshold), axis=0)
 
             # for j in ind:
             #     n_below.append(0. if T.le((self.y_pred[j] - y[j])**2, threshold) else 1.)
             #n_below = 
             
-            n_below = numpy.asarray(n_below)
+            #n_below = numpy.asarray(n_below)
             print n_below
-            return T.mean(n_below.sum())
-            
+            return T.mean(n_below)
 
         else:
             raise NotImplementedError()

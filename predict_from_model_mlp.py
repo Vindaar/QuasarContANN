@@ -20,15 +20,13 @@ import theano.tensor as T
 import fitsio
 from SDSSmodules.SDSSfiles import *
 from SDSSmodules.SDSSclasses import *
-from congrid import rebin_1d, get_arrays
 
-from logistic_sgd import LogisticRegression, load_data
+
 from mlp          import MLP
 from matplotlib import pyplot as plt
 from handle_data import load_SDSS_predict
 
-def predict_from_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epochs=1000,
-             dataset='mnist.pkl.gz', batch_size=3, n_hidden=500):
+def predict_from_mlp(args):
     
     save_file = open('classifier_best_params.mlp')
     layer_params = cPickle.load(save_file)
@@ -39,9 +37,6 @@ def predict_from_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epo
     index = T.lscalar()
     x = T.matrix('x')
     y = T.matrix('y')
-    start = 25000
-    end = 25100
-    datasets, size, wave_predict = load_SDSS_predict(args, start, end)
 
     rng = np.random.RandomState(1234)
     # construct the MLP class
@@ -55,6 +50,9 @@ def predict_from_mlp(args, learning_rate=0.01, L1_reg=0.00, L2_reg=0.0001, n_epo
         ann_layout=mlp_layout
     )
 
+    start = 25000
+    end = 25100
+    datasets, size, wave_predict = load_SDSS_predict(args, start, end)
     predict_set_x, predict_set_y = datasets[0]
     #predict_x_val = theano.function([x], x)
     #predict_y_val = function([predict_set_y], predict_set_y)
