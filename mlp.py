@@ -205,6 +205,11 @@ class MLP(object):
         # )
 
         # create several more hidden layers:
+        print W_hid, b_hid
+        print n_hid_layers
+
+        assert n_hid_layers
+
         for i in xrange(n_hid_layers - 1):
             # for i == 0 n_on_hid_layer contains the number of input neurons
             n_input   = n_on_hid_layer[i]
@@ -266,6 +271,8 @@ class MLP(object):
         self.prediction_error_sq = (
             self.logRegressionLayer.prediction_error_sq
         )
+        self.test = self.logRegressionLayer.test
+
         # same holds for the function computing the number of errors
         self.errors = self.logRegressionLayer.errors
         

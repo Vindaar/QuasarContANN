@@ -252,7 +252,7 @@ class DBN(object):
 
         test_score_i = theano.function(
             [index],
-            self.errors,
+            self.finetune_cost,
             givens={
                 self.x: test_set_x[
                     index * batch_size: (index + 1) * batch_size
@@ -265,7 +265,7 @@ class DBN(object):
 
         valid_score_i = theano.function(
             [index],
-            self.errors,
+            self.finetune_cost,
             givens={
                 self.x: valid_set_x[
                     index * batch_size: (index + 1) * batch_size
@@ -287,9 +287,9 @@ class DBN(object):
         return train_fn, valid_score, test_score
 
 
-def test_DBN(args, finetune_lr=0.01, pretraining_epochs=200,
-             pretrain_lr=0.005, k=2, training_epochs=10000,
-             dataset='mnist.pkl.gz', batch_size=500):
+def test_DBN(args, finetune_lr=0.05, pretraining_epochs=200,
+             pretrain_lr=0.0005, k=1, training_epochs=10000,
+             dataset='mnist.pkl.gz', batch_size=5):
     # pretrainig_epochs = 100
     # training_epochs = 1000
     """
@@ -331,7 +331,7 @@ def test_DBN(args, finetune_lr=0.01, pretraining_epochs=200,
         size     = cPickle.load(datafile)
     else:
         #datasets = load_data(dataset)
-        datasets, size = load_SDSS_data(args, 5000)
+        datasets, size = load_SDSS_data(args, 5000, wholespec=True)
 
 
 
@@ -346,10 +346,11 @@ def test_DBN(args, finetune_lr=0.01, pretraining_epochs=200,
     numpy_rng = numpy.random.RandomState(123)
     print '... building the model'
     # construct the Deep Belief Network
-    dbn = DBN(numpy_rng=numpy_rng, n_ins=24 * 24,
-              hidden_layers_sizes=[1000, 1000, 1000],
+    dbn = DBN(numpy_rng=numpy_rng, n_ins=size,#n_ins=24 * 24,
+              hidden_layers_sizes=[400, 1000, 60],
               n_outs=size)
-    dbn_layout = [24*24, 1000, 1000, 1000, size]
+    #dbn_layout = [24*24, 1000, 1000, 1000, size]
+    dbn_layout = [size, 400, 1000, 60, size]
 
     # start-snippet-2
     #########################
@@ -445,52 +446,83 @@ def test_DBN(args, finetune_lr=0.01, pretraining_epochs=200,
 
 
     while (epoch < training_epochs) and (not done_looping):
-        epoch = epoch + 1
-        for minibatch_index in xrange(n_train_batches):
+        try:
+            epoch = epoch + 1
+            for minibatch_index in xrange(n_train_batches):
 
-            minibatch_avg_cost = train_fn(minibatch_index)
-            iter = (epoch - 1) * n_train_batches + minibatch_index
+                minibatch_avg_cost = train_fn(minibatch_index)
+                iter = (epoch - 1) * n_train_batches + minibatch_index
 
-            if (iter + 1) % validation_frequency == 0:
+                if (iter + 1) % validation_frequency == 0:
 
-                validation_losses = validate_model()
-                this_validation_loss = numpy.mean(validation_losses)
-                print(
-                    'epoch %i, minibatch %i/%i, validation error %f %%'
-                    % (
-                        epoch,
-                        minibatch_index + 1,
-                        n_train_batches,
-                        this_validation_loss * 100.
+                    validation_losses = validate_model()
+                    this_validation_loss = numpy.mean(validation_losses)
+                    print(
+                        'epoch %i, minibatch %i/%i, validation error %f %%'
+                        % (
+                            epoch,
+                            minibatch_index + 1,
+                            n_train_batches,
+                            this_validation_loss * 100.
+                        )
                     )
-                )
 
-                # if we got the best validation score until now
-                if this_validation_loss < best_validation_loss:
+                    # if we got the best validation score until now
+                    if this_validation_loss < best_validation_loss:
 
-                    #improve patience if loss improvement is good enough
-                    if (
-                        this_validation_loss < best_validation_loss *
-                        improvement_threshold
-                    ):
-                        patience = max(patience, iter * patience_increase)
+                        #improve patience if loss improvement is good enough
+                        if (
+                            this_validation_loss < best_validation_loss *
+                            improvement_threshold
+                        ):
+                            patience = max(patience, iter * patience_increase)
 
-                    # save best validation score and iteration number
-                    best_validation_loss = this_validation_loss
-                    best_iter = iter
-                    best_params = dbn.params
+                        # save best validation score and iteration number
+                        best_validation_loss = this_validation_loss
+                        best_iter = iter
+                        best_params = dbn.params
 
-                    # test it on the test set
-                    test_losses = test_model()
-                    test_score = numpy.mean(test_losses)
-                    print(('     epoch %i, minibatch %i/%i, test error of '
-                           'best model %f %%') %
-                          (epoch, minibatch_index + 1, n_train_batches,
-                           test_score * 100.))
+                        # test it on the test set
+                        test_losses = test_model()
+                        test_score = numpy.mean(test_losses)
+                        print(('     epoch %i, minibatch %i/%i, test error of '
+                               'best model %f %%') %
+                              (epoch, minibatch_index + 1, n_train_batches,
+                               test_score * 100.))
 
-            if patience <= iter:
-                done_looping = True
-                break
+                if patience <= iter:
+                    done_looping = True
+                    break
+        except KeyboardInterrupt:
+            # while network is being trained, check for KeyboardInterrupt
+            # so that we can stop the training and save the network\
+            # print infos
+            print 'Termination initiated...'
+            print '...saving networks to unfinishedNetworks folder'
+            # cPickle networks (best and current)
+            save_file = open('./unfinishedNetworks/classifier_params_unfinished.dbn', 'wb')
+            cPickle.dump(dbn.params, save_file, -1)
+            cPickle.dump(dbn_layout, save_file, -1)
+            save_file.close()
+
+            save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.dbn', 'wb')
+            cPickle.dump(best_params, save_file, -1)
+            cPickle.dump(dbn_layout, save_file, -1)
+            save_file.close()
+            
+            print '...networks saved'
+            
+            continue_flag = raw_input(
+                'Do you really want to terminate the program?\n'
+                'If no, current networks will be saved, but program continues. (Y/n) '
+            )
+            
+            if continue_flag in ['y','Y']:
+                import sys
+                sys.exit('...terminate')
+            else:
+                continue
+
 
     end_time = time.clock()
     print(

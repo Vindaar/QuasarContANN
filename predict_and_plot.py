@@ -19,13 +19,14 @@ import theano
 import theano.tensor as T
 import cPickle
 from mlp          import MLP
-from handle_data import load_SDSS_predict
+from SdA          import SdA
+from handle_data import load_SDSS_predict, convert_flux_to_prediction
 from convolutional_mlp import LeNetConvNetwork
 from congrid import rebin_1d
 
 # class which contains all necessary functions to work on the matplotlib graph
 class WorkOnSpectrum:
-    def __init__(self, filelist, figure, ax, dustmap, settings, resid_corr, classifier, x):
+    def __init__(self, args, filelist, figure, ax, dustmap, settings, resid_corr, classifier, x, sda_flag = False):
         self.filelist  = filelist
         self.filetype  = check_filetype(filelist[0])
         self.fig       = figure
@@ -34,13 +35,20 @@ class WorkOnSpectrum:
         self.nspec     = len(filelist)
         self.settings  = settings
         self.resid_corr= resid_corr
+        self.sda_flag       = sda_flag
         # we read the starting index from the command line on initialization 
         self.start_iter= int(raw_input('Give the index of the first element to be plotted from the input file: '))
         self.i         = self.start_iter
         # and read the first 100 elements starting from there
-        datasets, size, self.wave_predict = load_SDSS_predict(None, self.i, self.i+100, filelist=self.filelist)
-        if self.filetype == 3:
+        datasets, size, size_out, self.wave_predict = load_SDSS_predict(None, self.i, self.i+100, filelist=self.filelist, wholespec = True, percentile = 100)
+        if self.filetype in [3, 4]:
             self.predict_set_x, self.predict_set_y = datasets[0]
+            #convert prediction flux to LeNet output:
+            #ann_path = '/home/basti/SDSS_indie/Python/MachineLearning/stacked_networks/stacked_best_layer0.convmlp'
+            #self.predict_set_x = convert_flux_to_prediction(None, size, self.predict_set_x, ann_path=ann_path, mlp_flag=False)[0]
+            #ann_path = '/home/basti/SDSS_indie/Python/MachineLearning/stacked_networks/stacked_best_layer1.convmlp'
+            #self.predict_set_x = convert_flux_to_prediction(None, size, self.predict_set_x, ann_path=ann_path, mlp_flag=True)[0]
+            #self.predict_set_x = convert_flux_to_prediction(args, size, self.predict_set_x, mlp_flag=False)[0]
         else:
             # if not speclya files, only set_x is returned
             self.predict_set_x = datasets
@@ -50,30 +58,65 @@ class WorkOnSpectrum:
         self.x     = x
         self.y     = T.matrix('y')
         print np.size(self.predict_set_x[0].eval())
-        if self.filetype == 3:
+
+        ########################################
+        ############# SdA ######################
+        ########################################
+        
+        if sda_flag == True:
+            self.predict_from_dA = theano.function(
+                inputs=[self.index],
+                outputs=[self.classifier.dA_layers[0].get_hidden_values(self.x),
+                         self.classifier.dA_layers[0].get_reconstructed_input(self.classifier.dA_layers[0].get_hidden_values(self.x))
+                    #self.classifier.dA_layers[2].get_hidden_values(self.classifier.dA_layers[1].get_hidden_values(self.classifier.dA_layers[0].get_hidden_values(self.x))),
+                    #self.classifier.dA_layers[2].get_reconstructed_input(self.classifier.dA_layers[2].get_hidden_values(self.classifier.dA_layers[1].get_hidden_values(self.classifier.dA_layers[0].get_hidden_values(self.x)))),
+                ],
+                givens={
+                    self.x: self.predict_set_x[self.index:(self.index+1)],
+                }
+            )
             self.predict_from_mlp = theano.function(
                 inputs=[self.index],
                 outputs=[
                     self.classifier.y_pred,
-                    #self.classifier.hiddenLayer[0].output,
-                    self.classifier.prediction_error_sq(self.y)
-                ],#hiddenLayer[0].output,
+                    self.classifier.finetune_cost
+                ],
                 givens={
-                    self.x: self.predict_set_x[self.index:(self.index+1)],
-                    self.y: self.predict_set_y[self.index:(self.index+1)]
+                    self.classifier.x: self.predict_set_x[self.index:(self.index+1)],
+                    self.classifier.y: self.predict_set_y[self.index:(self.index+1)]
                 }
             )
+
+        ########################################
+        ############# other ANNs ###############
+        ########################################
+
         else:
-            self.predict_from_mlp = theano.function(
-                inputs=[self.index],
-                outputs=[
-                    self.classifier.y_pred
-                    #self.classifier.hiddenLayer[0].output,
-                ],#hiddenLayer[0].output,
-                givens={
-                    self.x: self.predict_set_x[self.index:(self.index+1)]
-                }
-            )
+            if self.filetype in [3, 4]:
+                self.predict_from_mlp = theano.function(
+                    inputs=[self.index],
+                    outputs=[
+                        self.classifier.y_pred,
+                        #self.classifier.hiddenLayer[-1].output,
+                        #self.classifier.test(self.y)[1]
+                        self.classifier.prediction_error_sq(self.y)
+                    ],#hiddenLayer[0].output,
+                    givens={
+                        self.x: self.predict_set_x[self.index:(self.index+1)],
+                        self.y: self.predict_set_y[self.index:(self.index+1)]
+                    }
+                )
+            else:
+                self.predict_from_mlp = theano.function(
+                    inputs=[self.index],
+                    outputs=[
+                        self.classifier.y_pred
+                        #self.classifier.hiddenLayer[0].output,
+                    ],#hiddenLayer[0].output,
+                    givens={
+                        self.x: self.predict_set_x[self.index:(self.index+1)]
+                    }
+                )
     
     def connect(self):
         self.cidpress = self.fig.canvas.mpl_connect('key_press_event', self.press)
@@ -91,8 +134,8 @@ class WorkOnSpectrum:
                 # if we have gone more than 100 spectra from the starting index, 
                 # we need to read more data for the ANN to predict from
                 if self.i >= self.start_iter+100:
-                    datasets, size, wave_predict = load_SDSS_predict(None, self.i, self.i+100, self.filelist)
-                    if self.filetype == 3:
+                    datasets, size, wave_predict = load_SDSS_predict(None, self.i, self.i+100, self.filelist, wholespec = True)
+                    if self.filetype in [3, 4]:
                         self.predict_set_x, self.predict_set_y = datasets[0]
                     else:
                         # if not speclya files, only set_x is returned
@@ -149,11 +192,13 @@ class WorkOnSpectrum:
         z_delta = self.settings.z_delta
         print 'filetype', self.filetype
         if self.filetype == 1:
-            read_spSpec_fitsio(self.filelist[self.i].rstrip(), spec, None)
+            read_spSpec_fitsio(  self.filelist[self.i].rstrip(), spec, None)
         if self.filetype == 2:
-            read_spec_fitsio(self.filelist[self.i].rstrip(), spec, None)
+            read_spec_fitsio(    self.filelist[self.i].rstrip(), spec, None)
         if self.filetype == 3:
-            read_speclya_fitsio(self.filelist[self.i].rstrip(), spec, None)
+            read_speclya_fitsio( self.filelist[self.i].rstrip(), spec, None)
+        if self.filetype == 4:
+            read_mockspec_fitsio(self.filelist[self.i].rstrip(), spec)
 
         zem_index = calc_zem_index(spec.z, z_min, z_delta)
         print 'zem_index:', zem_index
@@ -176,7 +221,7 @@ class WorkOnSpectrum:
         #        flux_lya   = smooth_array(flux_lya[ind], 5, spec.flux_error[ind])
 
         self.axarr.plot(spec.wave, spec.flux, 'r-', linewidth=0.5)
-        #self.axarr.plot(spec.wave, spec.model_sdss, 'g-')
+        self.axarr.plot(spec.wave, spec.model_sdss, 'g-')
 
         #axarr.plot(wave_predict[i], predict_set_x[i].eval(), 'r-')
         #axarr.plot(wave_predict[i], predict_set_y[i].eval(), 'g-')
@@ -195,34 +240,74 @@ class WorkOnSpectrum:
             print 'regulator broken!!'
             regulator = 1
         #regulator = 1
+
+        # now revert the normalization
+        # revert mahalanobis scaling
+        flux_temp = spec.flux[index]
+        mean = np.mean(flux_temp)
+        std  = np.std(flux_temp)
         
         # dust correction related properties
         spec.Ebv = obstools.get_SFD_dust(spec.coordinates.galactic.l.deg, spec.coordinates.galactic.b.deg, self.dustmap, interpolate=0)
         spec.filename = filename
         Gal_extinction_correction(spec)
 
-
-
         predict_index = self.i - self.start_iter
         print 'predict_index', predict_index
-        if self.filetype == 3:
+        if self.filetype in [3, 4]:
             flux_prediction, prediction_error = self.predict_from_mlp(predict_index)
+            # if we're using a sda, also get reconstructed and hidden arrays!
+            if self.sda_flag == True:
+                hidden_vals, reconstruction   = self.predict_from_dA(predict_index) 
+                hidden_vals   = hidden_vals[0]
+                reconstruction = reconstruction[0]
             flux_prediction = flux_prediction[0]
+
+            # get model_y from prediction set as well, to crosscheck we're using
+            # the correct element from the dataset for the ANN!
+            model_y = self.predict_set_y[predict_index].eval()
+
             # to compare prediction_error theano with numpy:
             # calc prediction error:
-            model_y = self.predict_set_y[predict_index].eval()
-            prediction_error_manual = (flux_prediction - model_y)**2
+            prediction_error_manual = np.sum((flux_prediction - model_y)**2)
             print 'prediction error manually and theano', prediction_error_manual, prediction_error
             print 'max, percentile', np.max(prediction_error_manual), np.percentile(prediction_error_manual, 75)
         else:
+            # in case of a dataset without PCA (DR10 etc.), we use a function without a returned model
             flux_prediction = self.predict_from_mlp(predict_index)
             flux_prediction = flux_prediction[0][0]
+            if self.sda_flag == True:
+                hidden_vals, reconstruction   = self.predict_from_dA(predict_index) 
+                hidden_vals    = hidden_vals[0]
+                reconstruction = reconstruction[0]
 
-        # now revert the normalization
-        flux_prediction *= regulator
+        # revert mahalanobis continue
+        #flux_prediction = flux_prediction * std + mean
+        # if self.filetype in [3, 4]:
+        #     model_y         = model_y * std + mean
 
-        if np.size(flux_prediction) != np.size(self.wave_predict[0]):
-            flux_prediction = rebin_1d(flux_prediction, np.size(self.wave_predict[0]), method='spline')
+        # revert the regulator (normalization by max value in array)
+        flux_prediction    *= regulator
+        if self.sda_flag == True:
+            hidden_vals    *= regulator
+            reconstruction *= regulator
+        if self.filetype in [3, 4]:
+            model_y        *= regulator
+        # get number of pixels of wave array to interpolate:
+        npix = np.size(self.wave_predict[0])
+
+        if np.size(flux_prediction) != npix:
+            flux_prediction = rebin_1d(flux_prediction, npix, method='spline')
+            if self.filetype in [3, 4]:
+                model_y = rebin_1d(model_y, npix, method='spline')
+
+        if self.sda_flag == True and np.size(hidden_vals) != npix:
+            #
+            hidden_vals     = rebin_1d(hidden_vals,     npix, method='spline')
+            reconstruction  = rebin_1d(reconstruction,  npix, method='spline')
+            print hidden_vals, reconstruction
+            print np.size(hidden_vals), np.size(reconstruction)
+
         ind_nonzero = np.nonzero(flux_prediction)
         
         # model_for_pred = theano.function(
@@ -232,30 +317,34 @@ class WorkOnSpectrum:
 
         self.axarr.plot(self.wave_predict[predict_index], flux_prediction, 'm-')
         #self.axarr.plot(self.wave_predict[predict_index], model_for_pred(predict_index)*regulator, 'k-')
-        if self.filetype == 3:
-            self.axarr.plot(self.wave_predict[predict_index], model_y*regulator, 'k-')
+        if self.filetype in [3, 4]:
+            self.axarr.plot(self.wave_predict[predict_index], model_y, 'k-')
 
+        # if self.sda_flag == True:
+        #     self.axarr.plot(self.wave_predict[predict_index], hidden_vals, 'cyan')
+        #     self.axarr.plot(self.wave_predict[predict_index], reconstruction, 'g-')
 
         # flux corrected spectrum
         # plot spectrum error
-        self.axarr.plot(spec.wave, spec.flux_error, 'b-')
+        self.axarr.plot(spec.wave, spec.flux_error, 'b-', alpha=0.2)
+        
+        #self.axarr.plot(spec.wave, spec.sky, 'orange')
+        #self.axarr.plot(spec.wave, spec.model_sdss, 'orange')
         # plot fit_powerlaw_individual
         #self.axarr.plot(spec.wave, spec.powerlaw,'m-', linewidth=2.5)
 
         # set title
         filename   = str(spec.filename) + '    '
-        zem_str    = 'zem: ' + "{0:.5f}".format(float(spec.z)) + '    ' + 'Alt: ' + '\n'#"{0:.4}".format(float(spec.altitude)) + '\n'
+        zem_str    = 'zem: ' + "{0:.5f}".format(float(spec.z)) + '    '# + 'Alt: ' + '\n'"{0:.4}".format(float(spec.altitude)) + '\n'
         individual = 'alpha_ind: ' + "{0:.5f}".format(spec.alpha) + '    ' + 'chisq_ind: ' + "{0:.5f}".format(spec.chisq)# + '\n'
         #median     = 'alpha_med: ' + "{0:.5f}".format(spec_median.alpha) + '    ' + 'chisq_med: ' + "{0:.5f}".format(spec_median.chisq)
         title = filename + zem_str + individual# + median
 
         self.axarr.set_title(title)
         self.axarr.set_xlim(900, 1600)
-#        self.axarr.set_ylim(-1/4.0*np.max(spec.flux[50:-50]), np.max(spec.flux[50:-50]))
         print np.min(spec.flux), np.max(spec.flux)
         print np.where(spec.flux == np.max(spec.flux))[0]
         # show plot
-
         plt.draw()
 
     def disconnect(self):
@@ -282,6 +371,7 @@ def main(args):
     saved_ann = open(saved_ann_str)
     layer_params = cPickle.load(saved_ann)
     ann_layout   = cPickle.load(saved_ann)
+    ann_layout = (2, 3200, 5000, 1936, 11000, 1936, 11000, 1936)
     saved_ann.close()
 
     # create function to predict from classifier
@@ -297,6 +387,7 @@ def main(args):
             rng=rng,
             input=x,
             layer_params=layer_params,
+            activation=T.tanh,
             ann_layout=ann_layout
         )
     
@@ -316,6 +407,7 @@ def main(args):
             poolsize=(2,2),
             nkerns=nkerns,
             ann_layout=ann_layout,
+            activation=T.tanh,
             layer_params = layer_params
         )
 
@@ -328,6 +420,19 @@ def main(args):
             n_visible=44 * 44,
             n_hidden=500
         )        
+
+    # deal with the SdA class
+    sda_flag = False
+    if '--SdA' in args:
+        classifier = SdA(
+            numpy_rng=rng,
+            n_ins=ann_layout[0],
+            hidden_layers_sizes=ann_layout[1:-1],
+            n_outs=ann_layout[-1],
+            layer_params = layer_params
+        )
+        sda_flag = True
+
 
     # determine if it's a DR7 or DR10 file
     filetype = check_filetype(filelist[0])
@@ -351,7 +456,7 @@ def main(args):
     fig, axarr = plt.subplots(1, sharex=True, figsize=(10,8), dpi=100)
     # create WorkOnSpectrum object
     resid_corr = read_resid_corr('residcorr_v5_4_45.dat')
-    spectra = WorkOnSpectrum(filelist, fig, axarr, dustmap, settings, resid_corr, classifier, x)
+    spectra = WorkOnSpectrum(args, filelist, fig, axarr, dustmap, settings, resid_corr, classifier, x, sda_flag = sda_flag)
     spectra.connect()
     plt.show()
 

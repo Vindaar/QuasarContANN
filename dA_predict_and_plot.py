@@ -41,7 +41,7 @@ class WorkOnSpectrum:
         self.start_iter= int(raw_input('Give the index of the first element to be plotted from the input file: '))
         self.i         = self.start_iter
         # and read the first 100 elements starting from there
-        datasets, size, self.wave_predict = load_SDSS_predict(None, self.i, self.i+100, filelist=self.filelist)
+        datasets, size, size_out, self.wave_predict = load_SDSS_predict(None, self.i, self.i+100, filelist=self.filelist)
         if self.filetype == 3:
             self.predict_set_x, self.predict_set_y = datasets[0]
         else:
@@ -79,7 +79,7 @@ class WorkOnSpectrum:
                 # if we have gone more than 100 spectra from the starting index, 
                 # we need to read more data for the ANN to predict from
                 if self.i >= self.start_iter+100:
-                    datasets, size, wave_predict = load_SDSS_predict(None, self.i, self.i+100, self.filelist)
+                    datasets, size, size_out, self.wave_predict = load_SDSS_predict(None, self.i, self.i+100, self.filelist)
                     if self.filetype == 3:
                         self.predict_set_x, self.predict_set_y = datasets[0]
                     else:

@@ -27,7 +27,7 @@ import sys
 import time
 import cPickle
 
-import numpy
+import numpy as np
 
 import theano
 import theano.tensor as T
@@ -39,11 +39,17 @@ from logistic_sgd import LogisticRegression, load_data
 from mlp import HiddenLayer
 from convolutional_mlp import LeNetConvNetwork
 
+# to plot the progress of the network training:
+import matplotlib.pyplot as plt
 
-def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
+
+def evaluate_lenet5(args, learning_rate=0, n_epochs=50000,
                     dataset='mnist.pkl.gz',
                     nkerns=[20, 50], batch_size=5):
     """ Demonstrates lenet on MNIST dataset
+    NOTE: learning_rate needs to be 0, since we change it. If not 0 at the beginning
+    it will screw up results!!!
+
 
     :type learning_rate: float
     :param learning_rate: learning rate used (factor for the stochastic
@@ -67,6 +73,20 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
         except IndexError:
             import sys
             sys.exit('Error: Provide a file from which to unpickle SDSS data!')
+    if '--train_ann' in args:
+        try:
+            i = args.index('--train_ann')
+            saved_ann = args[i+1]
+        except IndexError:
+            import sys
+            sys.exit('Error: Provide a file from which to read a LeNet network to train further!')
+        saved_ann = open(saved_ann)
+        layer_params = cPickle.load(saved_ann)
+        ann_layout   = cPickle.load(saved_ann)
+        saved_ann.close()
+    else:
+        layer_params = None
+        ann_layout   = None
 
     # Load spectra as a data set. Train, validate and test
     # first check, whether we read data from a pickled file
@@ -74,9 +94,10 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
         datafile = open(unpickle_data)
         datasets = cPickle.load(datafile)
         size     = cPickle.load(datafile)
+        size_out = cPickle.load(datafile)
     else:
         #datasets = load_data(dataset)
-        datasets, size = load_SDSS_data(args, 200, reshape_2D = 0)
+        datasets, size, size_out = load_SDSS_data(args, 10000, reshape_2D = 0, wholespec=True, percentile = 100)
 
     train_set_x, train_set_y = datasets[0]
     valid_set_x, valid_set_y = datasets[1]
@@ -86,7 +107,7 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
 
     #TODO: the training data needs to be dust corrected and residual corrected!
 
-    rng = numpy.random.RandomState(23455)
+    rng = np.random.RandomState(23455)
 
     # compute number of minibatches for training, validation and testing
     n_train_batches = train_set_x.get_value(borrow=True).shape[0] / batch_size
@@ -124,8 +145,9 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
     # 50*3*3 is the number of outputs on the last convolutional layer calculated by
     # nkerns[i-1] * ((image_size - filter_size + 1) / 2)**2 recursively over the 
     # layers. In implementation for further details
-    #ann_layout   = (2, 50*3*3, 500, size)
-    ann_layout   = (2, nkerns[-1]*8*8, 2000, 60, size)
+    #ann_layout   = (2, nkerns[-1]*3*3, 1000, 35, size)
+    #ann_layout   = (2, nkerns[-1]*8*8, 2500, 2000, size)
+    ann_layout   = (2, nkerns[-1]*8*8, 2000, 5000, size_out)
 
     classifier = LeNetConvNetwork(
         rng=rng,
@@ -135,7 +157,9 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
         image0_shape=(batch_size, 1, 44, 44),
         poolsize=(2,2),
         nkerns=nkerns,
-        ann_layout=ann_layout
+        ann_layout=ann_layout,
+        activation = T.tanh,
+        layer_params = layer_params
     )
 
     # create a function to compute the mistakes that are made by the model
@@ -150,6 +174,7 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
 
     validate_model = theano.function(
         [index],
+        #classifier.test(y)[-1],
         classifier.prediction_error_sq(y),
         givens={
             x: valid_set_x[index * batch_size: (index + 1) * batch_size],
@@ -161,40 +186,11 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
     # the model plus the regularization terms (L1 and L2); cost is expressed
     # here symbolically
     cost = (
-         classifier.prediction_error_sq(y)
-    )
-    # as error we use: cost = error**2
-    # where error: (expected value - output value)
-    # 
-
-    #cost = classifier.cost(y)
-
-    #err = y - 
-    
-    # end-snippet-4
-
-    print 'f', test_set_y[0].shape[1]#, test_set_y[0].eval()
-
-    # compiling a Theano function that computes the mistakes that are made
-    # by the model on a minibatch
-    test_model = theano.function(
-        inputs=[index],
-        outputs=classifier.prediction_error_sq(y),#classifier.errors(y, threshold=0.001),
-        givens={
-            x: test_set_x[index * batch_size:(index + 1) * batch_size],
-            y: test_set_y[index * batch_size:(index + 1) * batch_size]
-        }
+        #classifier.test(y)[1]
+        classifier.prediction_error_sq(y)
     )
 
-    validate_model = theano.function(
-        inputs=[index],
-        outputs=classifier.prediction_error_sq(y),#classifier.errors(y, threshold=0.001),
-        givens={
-            x: valid_set_x[index * batch_size:(index + 1) * batch_size],
-            y: valid_set_y[index * batch_size:(index + 1) * batch_size]
-        }
-    )
-
+    print 'f', test_set_y[:].shape[1].eval()#, test_set_y[0].eval()
 
     # create a list of all model parameters to be fit by gradient descent
     params = classifier.params
@@ -214,6 +210,7 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
         (param_i, param_i - T.cast(lr, dtype=theano.config.floatX) * grad_i)
         for param_i, grad_i in zip(params, grads)
     ]
+    #updates = [(param_i, param_i) for param_i in params]
 
     # compiling a Theano function `train_model` that returns the cost, but
     # in the same time updates the parameter of the model based on the rules
@@ -227,6 +224,16 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
             y: train_set_y[index * batch_size: (index + 1) * batch_size]
         }
     )
+
+    # test = theano.function(
+    #     inputs=[index, theano.Param(lr, default=learning_rate)],
+    #     outputs=classifier.test(y),
+    #     updates=updates,
+    #     givens={
+    #         x: train_set_x[index * batch_size: (index + 1) * batch_size],
+    #         y: train_set_y[index * batch_size: (index + 1) * batch_size]
+    #     }
+    # )
     # end-snippet-5
 
     ###############
@@ -247,7 +254,7 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
                                   # check every epoch
 
     best_params = None
-    best_validation_loss = numpy.inf
+    best_validation_loss = np.inf
     best_iter = 0
     test_score = 0.
     start_time = time.clock()
@@ -256,25 +263,57 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
     done_looping = False
     learning_0 = 1
     tau = 0.05
+    epoch_for_learning_rate = 0
+
+    train_cost_list = []
+    valid_cost_list = []
+    test_cost_list  = []
+
+    fig, axarr = plt.subplots(1)
+    plt.show(block=False)
 
     while (epoch < n_epochs) and (not done_looping):
         try:
             #learning_rate = learning_0 * tau / (tau + epoch) 
-            learning_rate = learning_0 / (1 + tau * epoch)
+            
+            learning_rate = learning_0 / (1 + tau * epoch_for_learning_rate)
             print 'learning_rate for this epoch:', learning_rate
             epoch = epoch + 1
-            for minibatch_index in xrange(n_train_batches):
+            epoch_for_learning_rate += 1
+            train_avg_cost = []
 
-                minibatch_avg_cost = train_model(minibatch_index)
+            for minibatch_index in xrange(n_train_batches):
+                #a, b =  test(minibatch_index, learning_rate)
+                #print np.size(a), np.size(b), a, b
+                minibatch_avg_cost = train_model(minibatch_index, learning_rate)
+                train_avg_cost.append(minibatch_avg_cost)
+                #print 'train stuff', minibatch_avg_cost, epoch, minibatch_index
+                
+                assert np.isnan(minibatch_avg_cost) == False
                 # iteration number
                 iter = (epoch - 1) * n_train_batches + minibatch_index
                 if (iter + 1) % validation_frequency == 0:
                     # compute zero-one loss on validation set
-                    print 'train stuff', minibatch_avg_cost
+                    train_cost_list.append(np.mean(train_avg_cost))
+                    print 'train stuff', train_cost_list[-1]
                     validation_losses = [validate_model(i) for i
                                          in xrange(n_valid_batches)]
-                    this_validation_loss = numpy.mean(validation_losses)
+                    this_validation_loss = np.mean(validation_losses)
+                    valid_cost_list.append(this_validation_loss)
+                    
+                    ########################################
+                    ###### Perform some plotting ###########
+                    ########################################
 
+                    axarr.clear()
+                    axarr.plot(np.arange(len(train_cost_list)), train_cost_list)
+                    axarr.plot(np.arange(len(valid_cost_list)), valid_cost_list)
+                    axarr.set_xlabel('Epoch / #')
+                    axarr.set_ylabel('Test / Validation cost')
+                    plt.draw()
+                    time.sleep(0.1)
+                    plt.pause(0.0001)   
+                    
                     print(
                         'epoch %i, minibatch %i/%i, validation error %f %%' %
                         (
@@ -301,7 +340,7 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
                         # test it on the test set
                         test_losses = [test_model(i) for i
                                        in xrange(n_test_batches)]
-                        test_score = numpy.mean(test_losses)
+                        test_score = np.mean(test_losses)
 
                         print(('     epoch %i, minibatch %i/%i, test error of '
                                'best model %f %%') %
@@ -316,30 +355,47 @@ def evaluate_lenet5(args, learning_rate=0.1, n_epochs=50000,
             # while network is being trained, check for KeyboardInterrupt
             # so that we can stop the training and save the network\
             # print infos
-            print 'Termination initiated...'
-            print '...saving networks to unfinishedNetworks folder'
-            # cPickle networks (best and current)
-            save_file = open('./unfinishedNetworks/classifier_params_unfinished.convmlp', 'wb')
-            cPickle.dump(classifier.layer_params, save_file, -1)
-            cPickle.dump(ann_layout, save_file, -1)
-            save_file.close()
-
-            save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.convmlp', 'wb')
-            cPickle.dump(best_params, save_file, -1)
-            cPickle.dump(ann_layout, save_file, -1)
-            save_file.close()
-            
-            print '...networks saved'
-            
             continue_flag = raw_input(
                 'Do you really want to terminate the program?\n'
                 'If no, current networks will be saved, but program continues. (Y/n) '
             )
             
             if continue_flag in ['y','Y']:
+                save_flag = raw_input(
+                    'Do you wish to save the current network parameters in ./unfinishedNetworks? (Y/n) '
+                )
+                if save_flag in ['y','Y']:
+                    print '...saving networks to unfinishedNetworks folder'
+                    # cPickle networks (best and current)
+                    save_file = open('./unfinishedNetworks/classifier_params_unfinished.convmlp', 'wb')
+                    cPickle.dump(classifier.layer_params, save_file, -1)
+                    cPickle.dump(ann_layout, save_file, -1)
+                    save_file.close()
+                    save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.convmlp', 'wb')
+                    cPickle.dump(best_params, save_file, -1)
+                    cPickle.dump(ann_layout, save_file, -1)
+                    save_file.close()
+                    print '...networks saved'
                 import sys
                 sys.exit('...terminate')
             else:
+                print '...saving networks to unfinishedNetworks folder'
+                # cPickle networks (best and current)
+                save_file = open('./unfinishedNetworks/classifier_params_unfinished.convmlp', 'wb')
+                cPickle.dump(classifier.layer_params, save_file, -1)
+                cPickle.dump(ann_layout, save_file, -1)
+                save_file.close()
+                save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.convmlp', 'wb')
+                cPickle.dump(best_params, save_file, -1)
+                cPickle.dump(ann_layout, save_file, -1)
+                save_file.close()
+                print '...networks saved'
+                learn_flag = raw_input(
+                    'Do you wish to change the learning rate? (Y/n) '
+                )
+                if learn_flag in ['y', 'Y']:
+                    learning_0 = float(raw_input('Please give a new learning rate: '))
+                    epoch_for_learning_rate = 0
                 continue
 
 

@@ -225,6 +225,7 @@ class dA(object):
     def get_hidden_values(self, input):
         """ Computes the values of the hidden layer """
         return T.nnet.sigmoid(T.dot(input, self.W) + self.b)
+        #return T.tanh(T.dot(input, self.W) + self.b)
 
     def get_reconstructed_input(self, hidden):
         """Computes the reconstructed input given the values of the
@@ -232,6 +233,7 @@ class dA(object):
 
         """
         return T.nnet.sigmoid(T.dot(hidden, self.W_prime) + self.b_prime)
+        #return T.tanh(T.dot(hidden, self.W_prime) + self.b_prime)
 
     def get_cost_updates(self, corruption_level, learning_rate):
         """ This function computes the cost and the updates for one trainng
@@ -247,7 +249,8 @@ class dA(object):
         # basti: what happens if we take squared error instead?
         #L = - T.sum(self.x * T.log(z) + (1 - self.x) * T.log(1 - z), axis=1)
         # in case of regression, it probably makes more sense :)
-        L = T.sum((self.x - z)**2)
+        #L = T.sum((self.x - z)**2)
+        L = T.mean((self.x - z)**2)
         # note : L is now a vector, where each element is the
         #        cross-entropy cost of the reconstruction of the
         #        corresponding example of the minibatch. We need to

@@ -156,7 +156,62 @@ class LogisticRegression(object):
         # this function returns the squared error of the prediction, which
         # is used as the cost function.
         # TODO: Need to take -T.mean ?
+
+        ########################################
+        ######### METHOD 1:    #################
+        ########################################
+        # temp = (self.y_pred - y)**2
+        # nelem = temp[:].shape[1]
+        # print 'shape0', temp.ndim, nelem
+        # temp = T.sum(temp) / nelem
+        # print 'shape1', temp.ndim, nelem
+        # #temp = T.mean(temp, axis=1)
+        # print 'shape2', temp.ndim, nelem
+        # return temp#T.sum(T.mean(temp, axis=1), axis=0)
+
+        ########################################
+        ######### METHOD 2: R^2 ################
+        ########################################
+
+        # error_2 = T.sum((self.y_pred - y)**2)
+        
+        # mean    = T.mean(self.y_pred, axis=1)
+        # dev     = T.sum((self.y_pred - mean)**2)
+
+        # return dev + error_2/error_2#dev / error_2
+        
+        ########################################
+        ###### METHOD 3: standard mean squared #
+        ########################################
+
         return T.mean((self.y_pred - y)**2)
+
+    def test(self, y):
+
+        error_2 = T.sum((self.y_pred - y)**2)
+        nelem  = error_2.shape
+        
+        mean    = T.mean(self.y_pred, axis=1).dimshuffle(0, 'x')
+        nelem2  = mean.shape
+        dev     = (self.y_pred - mean)**2
+        nelem3  = dev.shape
+        dev     = T.sum(dev)
+
+        return nelem, nelem2, nelem3, error_2 / dev# + error_2/error_2#dev / error_2
+        
+        # temp = (self.y_pred - y)**2
+        # nelem = temp[:].shape[1]
+
+        # print 'shape0', temp.ndim, nelem
+        # temp2 = T.mean(temp, axis=1)
+        # nelem4 = temp2.shape
+
+        # temp = T.sum(temp2)
+        # print 'shape1', temp.ndim, nelem
+        # #temp = T.mean(temp, axis=1)
+        # print 'shape2', temp.ndim, nelem
+        # return temp, temp2, nelem3, nelem4
+
 
 
     def errors(self, y, threshold = 0.1):

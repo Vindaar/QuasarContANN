@@ -33,7 +33,7 @@ import os
 import sys
 import time
 
-import numpy
+import numpy as np
 
 import theano
 import theano.tensor as T
@@ -45,7 +45,7 @@ from dA import dA
 
 import cPickle
 from handle_data import load_SDSS_data
-
+import matplotlib.pyplot as plt
 
 # start-snippet-1
 class SdA(object):
@@ -66,11 +66,12 @@ class SdA(object):
         n_ins=784,
         hidden_layers_sizes=[500, 500],
         n_outs=10,
-        corruption_levels=[0.1, 0.1]
+        corruption_levels=[0.1, 0.1],
+        layer_params = None
     ):
         """ This class is made to support a variable number of layers.
 
-        :type numpy_rng: numpy.random.RandomState
+        :type numpy_rng: np.random.RandomState
         :param numpy_rng: numpy random number generator used to draw initial
                     weights
 
@@ -93,10 +94,40 @@ class SdA(object):
                                   layer
         """
 
+
         self.sigmoid_layers = []
         self.dA_layers = []
         self.params = []
         self.n_layers = len(hidden_layers_sizes)
+        
+        # if layer_params not None, we load a network configuration
+        if layer_params is not None:
+            # if we load a network, the number of elements in layer_params - 1 is the number of
+            # hidden layers in that network
+            if len(layer_params) == 1:
+                layer_params = layer_params[0]
+            W_hid = []
+            b_hid = []
+            try:
+                for layer in layer_params:
+                    W_hid_temp, b_hid_temp = layer
+                    W_hid.append(W_hid_temp)
+                    b_hid.append(b_hid_temp)
+            except TypeError:
+                for i in xrange(len(layer_params)/2):
+                    W_hid_temp = layer_params[2*i]
+                    b_hid_temp = layer_params[2*i+1]
+                    W_hid.append(W_hid_temp)
+                    b_hid.append(b_hid_temp)
+            W_logR = W_hid[-1]
+            b_logR = b_hid[-1]
+            W_hid  = np.asarray(W_hid[:-1])
+            b_hid  = np.asarray(b_hid[:-1])
+        else:
+            W_hid=[None for _ in xrange(self.n_layers)]
+            b_hid=[None for _ in xrange(self.n_layers)]
+            W_logR=None
+            b_logR=None
 
         assert self.n_layers > 0
 
@@ -105,7 +136,7 @@ class SdA(object):
         # allocate symbolic variables for the data
         self.x = T.matrix('x')  # the data is presented as rasterized images
         self.y = T.matrix('y')  # the labels are presented as 1D vector of
-                                 # [int] labels
+                                # [int] labels
         # end-snippet-1
 
         # The SdA is an MLP, for which all weights of intermediate layers
@@ -141,7 +172,10 @@ class SdA(object):
                                         input=layer_input,
                                         n_in=input_size,
                                         n_out=hidden_layers_sizes[i],
-                                        activation=T.nnet.sigmoid)
+                                        activation=T.nnet.sigmoid,
+                                        #activation=T.tanh,
+                                        W=W_hid[i],
+                                        b=b_hid[i])
             # add the layer to our list of layers
             self.sigmoid_layers.append(sigmoid_layer)
             # its arguably a philosophical question...
@@ -166,11 +200,16 @@ class SdA(object):
         self.logLayer = LogisticRegression(
             input=self.sigmoid_layers[-1].output,
             n_in=hidden_layers_sizes[-1],
-            n_out=n_outs
+            n_out=n_outs,
+            W=W_logR,
+            b=b_logR
         )
 
         self.params.extend(self.logLayer.params)
-        # construct a function that implements one step of finetunining
+        # construct a function that implements one step of finetuning
+
+        # define prediction function inherited from logLayer
+        self.y_pred = self.logLayer.y_pred
 
         # compute the cost for second phase of training,
         # defined as the negative log likelihood
@@ -329,9 +368,9 @@ class SdA(object):
         return train_fn, valid_score, test_score
 
 
-def test_SdA(args, finetune_lr=0.1, pretraining_epochs=50,
-             pretrain_lr=0.001, training_epochs=100,
-             dataset='mnist.pkl.gz', batch_size=1):
+def test_SdA(args, finetune_lr=0.2, pretraining_epochs=200,
+             pretrain_lr=0.5, training_epochs=250,
+             dataset='mnist.pkl.gz', batch_size=5):
     """
     Demonstrates how to train and test a stochastic denoising autoencoder.
 
@@ -358,7 +397,8 @@ def test_SdA(args, finetune_lr=0.1, pretraining_epochs=50,
 
 
 
-    unpickle_data = ''
+    unpickle_data  = ''
+    pretrain_model = ''
     if '--unpickle' in args:
         try:
             i = args.index('--unpickle')
@@ -366,6 +406,13 @@ def test_SdA(args, finetune_lr=0.1, pretraining_epochs=50,
         except IndexError:
             import sys
             sys.exit('Error: Provide a file from which to unpickle SDSS data!')
+    if '--pretrain' in args:
+        try:
+            i = args.index('--pretrain')
+            pretrain_model = args[i+1]
+        except IndexError:
+            import sys
+            sys.exit('Error: Provide a file from which to read the pretrained model!')
 
     # Load spectra as a data set. Train, validate and test
     # first check, whether we read data from a pickled file
@@ -373,9 +420,11 @@ def test_SdA(args, finetune_lr=0.1, pretraining_epochs=50,
         datafile = open(unpickle_data)
         datasets = cPickle.load(datafile)
         size     = cPickle.load(datafile)
+        size_out = cPickle.load(datafile)
+        datafile.close()
     else:
         #datasets = load_data(dataset)
-        datasets, size = load_SDSS_data(args, 2000)
+        datasets, size, size_out = load_SDSS_data(args, 5000)
 
     train_set_x, train_set_y = datasets[0]
     valid_set_x, valid_set_y = datasets[1]
@@ -389,56 +438,108 @@ def test_SdA(args, finetune_lr=0.1, pretraining_epochs=50,
 
     # numpy random generator
     # start-snippet-3
-    numpy_rng = numpy.random.RandomState(89677)
+    numpy_rng = np.random.RandomState(89677)
     print '... building the model'
     # construct the stacked denoising autoencoder class
-    sda_layout = [size, 400, 1000, 400, size]
+    if len(pretrain_model) > 0: 
+        pretrain_model = open(pretrain_model)
+        sda_params = cPickle.load(pretrain_model)
+        sda_layout = cPickle.load(pretrain_model)
+        pretrain_model.close()
+    else:
+        sda_layout = [size, 5000, 5000, 5000, 5000, 5000, 5000, size_out]
+        sda_params = None
+
     sda = SdA(
         numpy_rng=numpy_rng,
         n_ins=sda_layout[0],
         hidden_layers_sizes=sda_layout[1:-1],
-        n_outs=sda_layout[-1]
+        n_outs=sda_layout[-1],
+        layer_params = sda_params
     )
-    # end-snippet-3 start-snippet-4
+
+
     #########################
     # PRETRAINING THE MODEL #
     #########################
-    print '... getting the pretraining functions'
-    pretraining_fns = sda.pretraining_functions(train_set_x=train_set_x,
-                                                batch_size=batch_size)
+    if pretrain_model == '':
+        print '... getting the pretraining functions'
+        pretraining_fns = sda.pretraining_functions(train_set_x=train_set_x,
+                                                    batch_size=batch_size)
 
-    print '... pre-training the model'
-    start_time = time.clock()
-    ## Pre-train layer-wise
-    corruption_levels = [.1, .2, .3]
-    for i in xrange(sda.n_layers):
-        # go through pretraining epochs
-        for epoch in xrange(pretraining_epochs):
-            # go through the training set
-            c = []
-            for batch_index in xrange(n_train_batches):
-                c.append(pretraining_fns[i](index=batch_index,
-                         corruption=corruption_levels[i],
-                         lr=pretrain_lr))
-            print 'Pre-training layer %i, epoch %d, cost ' % (i, epoch),
-            print numpy.mean(c)
+        print '... pre-training the model'
+        start_time = time.clock()
+        ## Pre-train layer-wise
+        corruption_levels = [.1, .1, .1, .1, .1, .1]
+        done_looping = False
+        for i in xrange(sda.n_layers):
+            # go through pretraining epochs
+            epoch = 0
+            fig, axarr = plt.subplots(1)
+            plt.show(block=False)
+            pretrain_cost_list = []
+            while epoch < pretraining_epochs and done_looping == False:
+                try:
+                    # go through the training set
+                    epoch += 1
+                    c = []
+                    for batch_index in xrange(n_train_batches):
+                        c.append(pretraining_fns[i](index=batch_index,
+                                 corruption=corruption_levels[i],
+                                 lr=pretrain_lr))
+                    print 'Pre-training layer %i, epoch %d, cost ' % (i, epoch),
+                    print np.mean(c)
+                    ########################################
+                    ###### Perform some plotting ###########
+                    ########################################
+                    pretrain_cost_list.append(np.mean(c))
 
-    end_time = time.clock()
-
-    import sys
-    print >> sys.stderr, ('The pretraining code for file ' +
-                          os.path.split(__file__)[1] +
-                          ' ran for %.2fm' % ((end_time - start_time) / 60.))
-
-
-    # save the pretraining model
-    save_file = open('./classifier_params_unsupervised.SdA', 'wb')
-    cPickle.dump(sda.params, save_file, -1)
-    cPickle.dump(sda_layout, save_file, -1)
-    save_file.close()
+                    axarr.clear()
+                    axarr.plot(np.arange(len(pretrain_cost_list)), pretrain_cost_list)
+                    axarr.set_xlabel('Pretrain Epoch / #')
+                    axarr.set_ylabel('Pretrain cost')
+                    plt.draw()
+                    plt.savefig('./CostPlots/SdAPretrainCost.png')
+                    time.sleep(0.1)
+                    plt.pause(0.0001)   
 
 
-    # end-snippet-4
+                except KeyboardInterrupt:
+                    stop_flag = raw_input(
+                        'Do you wish to stop the program (Y) or stop the pretraining of this layer (n)?\n'
+                        '(Y / n): '
+                    )
+                    if stop_flag in ['Y', 'y']:
+                        import sys
+                        print '...saving networks to ./unfinishedNetworks/ and stopping program...'
+                        # save the pretraining model
+                        save_file = open('./unfinishedNetworks/classifier_params_unsupervised.SdA', 'wb')
+                        cPickle.dump(sda.params, save_file, -1)
+                        cPickle.dump(sda_layout, save_file, -1)
+                        save_file.close()
+                        print '...networks saved'
+                        sys.exit('...terminate')
+                    else:
+                        done_looping = True
+                        continue
+                        
+
+
+        end_time = time.clock()
+
+        import sys
+        print >> sys.stderr, ('The pretraining code for file ' +
+                              os.path.split(__file__)[1] +
+                              ' ran for %.2fm' % ((end_time - start_time) / 60.))
+
+
+        # save the pretraining model
+        save_file = open('./unfinishedNetworks/classifier_params_unsupervised.SdA', 'wb')
+        cPickle.dump(sda.params, save_file, -1)
+        cPickle.dump(sda_layout, save_file, -1)
+        save_file.close()
+
+
     ########################
     # FINETUNING THE MODEL #
     ########################
@@ -451,9 +552,9 @@ def test_SdA(args, finetune_lr=0.1, pretraining_epochs=50,
         learning_rate=finetune_lr
     )
 
-    print '... finetunning the model'
+    print '... finetuning the model'
     # early-stopping parameters
-    patience = 10 * n_train_batches  # look as this many examples regardless
+    patience = 500 * n_train_batches  # look as this many examples regardless
     patience_increase = 2.  # wait this much longer when a new best is
                             # found
     improvement_threshold = 0.995  # a relative improvement of this much is
@@ -464,31 +565,77 @@ def test_SdA(args, finetune_lr=0.1, pretraining_epochs=50,
                                   # on the validation set; in this case we
                                   # check every epoch
 
-    best_validation_loss = numpy.inf
+    best_validation_loss = np.inf
     test_score = 0.
     start_time = time.clock()
     best_params = 0
 
-    done_looping = False
     epoch = 0
+    done_looping = False
+    learning_0 = 1
+    tau = 0.05
+    epoch_for_learning_rate = 0
+
+    train_cost_list = []
+    valid_cost_list = []
+    test_cost_list  = []
+
+    fig, axarr = plt.subplots(1)
+    plt.show(block=False)
 
     while (epoch < training_epochs) and (not done_looping):
         try:
+            #learning_rate = learning_0 * tau / (tau + epoch) 
+            
+            learning_rate = learning_0 / (1 + tau * epoch_for_learning_rate)
+            #print 'learning_rate for this epoch:', learning_rate
             epoch = epoch + 1
+            epoch_for_learning_rate += 1
+            train_avg_cost = []
             for minibatch_index in xrange(n_train_batches):
+                #a, b =  test(minibatch_index, learning_rate)
+                #print np.size(a), np.size(b), a, b
                 minibatch_avg_cost = train_fn(minibatch_index)
+                train_avg_cost.append(minibatch_avg_cost)
+                #print 'train stuff', minibatch_avg_cost, epoch, minibatch_index
+                
+                assert np.isnan(minibatch_avg_cost) == False
+                # iteration number
                 iter = (epoch - 1) * n_train_batches + minibatch_index
-
                 if (iter + 1) % validation_frequency == 0:
+                    # compute zero-one loss on validation set
+                    train_cost_list.append(np.mean(train_avg_cost))
+                    print 'train stuff', train_cost_list[-1]
                     validation_losses = validate_model()
-                    this_validation_loss = numpy.mean(validation_losses)
-                    print('epoch %i, minibatch %i/%i, validation error %f %%' %
-                          (epoch, minibatch_index + 1, n_train_batches,
-                           this_validation_loss * 100.))
+                    this_validation_loss = np.mean(validation_losses)
+                    valid_cost_list.append(this_validation_loss)
+                    
+                    ########################################
+                    ###### Perform some plotting ###########
+                    ########################################
+
+                    axarr.clear()
+                    axarr.plot(np.arange(len(train_cost_list)), train_cost_list)
+                    axarr.plot(np.arange(len(valid_cost_list)), valid_cost_list)
+                    axarr.set_xlabel('Epoch / #')
+                    axarr.set_ylabel('Test / Validation cost')
+                    plt.draw()
+                    plt.savefig('./CostPlots/SdAtrainCost.png')
+                    time.sleep(0.1)
+                    plt.pause(0.0001)   
+                    
+                    print(
+                        'epoch %i, minibatch %i/%i, validation error %f %%' %
+                        (
+                            epoch,
+                            minibatch_index + 1,
+                            n_train_batches,
+                            this_validation_loss * 100.
+                        )
+                    )
 
                     # if we got the best validation score until now
                     if this_validation_loss < best_validation_loss:
-
                         #improve patience if loss improvement is good enough
                         if (
                             this_validation_loss < best_validation_loss *
@@ -496,49 +643,69 @@ def test_SdA(args, finetune_lr=0.1, pretraining_epochs=50,
                         ):
                             patience = max(patience, iter * patience_increase)
 
-                        # save best validation score and iteration number
                         best_validation_loss = this_validation_loss
                         best_iter = iter
                         best_params = sda.params
 
                         # test it on the test set
                         test_losses = test_model()
-                        test_score = numpy.mean(test_losses)
+                        test_score = np.mean(test_losses)
+
                         print(('     epoch %i, minibatch %i/%i, test error of '
                                'best model %f %%') %
                               (epoch, minibatch_index + 1, n_train_batches,
                                test_score * 100.))
 
                 if patience <= iter:
+                    print 'done looping', epoch, iter
                     done_looping = True
                     break
         except KeyboardInterrupt:
             # while network is being trained, check for KeyboardInterrupt
             # so that we can stop the training and save the network\
             # print infos
-            print 'Termination initiated...'
-            print '...saving networks to unfinishedNetworks folder'
-            # cPickle networks (best and current)
-            save_file = open('./unfinishedNetworks/classifier_params_unfinished.SdA', 'wb')
-            cPickle.dump(sda.params, save_file, -1)
-            cPickle.dump(sda_layout, save_file, -1)
-            save_file.close()
-
-            save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.SdA', 'wb')
-            cPickle.dump(best_params, save_file, -1)
-            cPickle.dump(sda_layout, save_file, -1)
-            save_file.close()
-            
-            print '...networks saved'
-            
-            continue_flag = raw_input('Do you really want to terminate the program?\n If no, current networks will be saved, but program continues. (Y/n) ')
+            continue_flag = raw_input(
+                'Do you really want to terminate the program?\n'
+                'If no, current networks will be saved, but program continues. (Y/n) '
+            )
             
             if continue_flag in ['y','Y']:
+                save_flag = raw_input(
+                    'Do you wish to save the current network parameters in ./unfinishedNetworks? (Y/n) '
+                )
+                if save_flag in ['y','Y']:
+                    print '...saving networks to unfinishedNetworks folder'
+                    # cPickle networks (best and current)
+                    save_file = open('./unfinishedNetworks/classifier_params_unfinished.SdA', 'wb')
+                    cPickle.dump(sda.params, save_file, -1)
+                    cPickle.dump(sda_layout, save_file, -1)
+                    save_file.close()
+                    save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.SdA', 'wb')
+                    cPickle.dump(best_params, save_file, -1)
+                    cPickle.dump(sda_layout, save_file, -1)
+                    save_file.close()
+                    print '...networks saved'
                 import sys
                 sys.exit('...terminate')
             else:
+                print '...saving networks to unfinishedNetworks folder'
+                # cPickle networks (best and current)
+                save_file = open('./unfinishedNetworks/classifier_params_unfinished.SdA', 'wb')
+                cPickle.dump(sda.params, save_file, -1)
+                cPickle.dump(sda_layout, save_file, -1)
+                save_file.close()
+                save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.SdA', 'wb')
+                cPickle.dump(best_params, save_file, -1)
+                cPickle.dump(sda_layout, save_file, -1)
+                save_file.close()
+                print '...networks saved'
+                learn_flag = raw_input(
+                    'Do you wish to change the learning rate? (Y/n) '
+                )
+                if learn_flag in ['y', 'Y']:
+                    learning_0 = float(raw_input('Please give a new learning rate: '))
+                    epoch_for_learning_rate = 0
                 continue
-
 
     end_time = time.clock()
     print(

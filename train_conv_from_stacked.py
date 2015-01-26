@@ -1,60 +1,69 @@
 #!/usr/bin/env python
-"""
-script to initialize and train different neural networks
-"""
-__docformat__ = 'restructedtext en'
+"""This tutorial introduces the LeNet5 neural network architecture
+using Theano.  LeNet5 is a convolutional neural network, good for
+classifying images. This tutorial shows how to build the architecture,
+and comes with all the hyper-parameters you need to reproduce the
+paper's MNIST results.
 
 
-import cPickle
-import gzip
+This implementation simplifies the model in the following ways:
+
+ - LeNetConvPool doesn't implement location-specific gain and bias parameters
+ - LeNetConvPool doesn't implement pooling by average, it implements pooling
+   by max.
+ - Digit classification is implemented with a logistic regression rather than
+   an RBF network
+ - LeNet5 was not fully-connected convolutions at second layer
+
+References:
+ - Y. LeCun, L. Bottou, Y. Bengio and P. Haffner:
+   Gradient-Based Learning Applied to Document
+   Recognition, Proceedings of the IEEE, 86(11):2278-2324, November 1998.
+   http://yann.lecun.com/exdb/publis/pdf/lecun-98.pdf
+
+"""
 import os
 import sys
 import time
+import cPickle
 
-import numpy
+import numpy as np
 
 import theano
 import theano.tensor as T
-from handle_data import load_SDSS_data, convert_flux_to_prediction
+from theano.tensor.signal import downsample
+from theano.tensor.nnet import conv
+
+from handle_data import load_SDSS_data
 from logistic_sgd import LogisticRegression, load_data
-from mlp import MLP
+from mlp import HiddenLayer
 from convolutional_mlp import LeNetConvNetwork
-from congrid import rebin_1d
 
 # to plot the progress of the network training:
 import matplotlib.pyplot as plt
 
 
+def evaluate_lenet5(args, learning_rate=0, n_epochs=50000,
+                    dataset='mnist.pkl.gz',
+                    nkerns=[20, 50], batch_size=5):
+    """ Demonstrates lenet on MNIST dataset
+    NOTE: learning_rate needs to be 0, since we change it. If not 0 at the beginning
+    it will screw up results!!!
 
-def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
-             dataset='mnist.pkl.gz', batch_size=5, n_hidden=500):
-    """
-    Demonstrate stochastic gradient descent optimization for a multilayer
-    perceptron
-
-    This is demonstrated on MNIST.
 
     :type learning_rate: float
     :param learning_rate: learning rate used (factor for the stochastic
-    gradient
-
-    :type L1_reg: float
-    :param L1_reg: L1-norm's weight when added to the cost (see
-    regularization)
-
-    :type L2_reg: float
-    :param L2_reg: L2-norm's weight when added to the cost (see
-    regularization)
+                          gradient)
 
     :type n_epochs: int
     :param n_epochs: maximal number of epochs to run the optimizer
 
     :type dataset: string
-    :param dataset: the path of the MNIST dataset file from
-                 http://www.iro.umontreal.ca/~lisa/deep/data/mnist/mnist.pkl.gz
+    :param dataset: path to the dataset used for training /testing (MNIST here)
 
-
-   """
+    :type nkerns: list of ints
+    :param nkerns: number of kernels on each layer
+    """
 
     unpickle_data = ''
     if '--unpickle' in args:
@@ -70,16 +79,15 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
             saved_ann = args[i+1]
         except IndexError:
             import sys
-            sys.exit('Error: Provide a file from which to read a MLP network to train further!')
+            sys.exit('Error: Provide a file from which to read a LeNet network to train further!')
         saved_ann = open(saved_ann)
-        unsupervised_params = cPickle.load(saved_ann)
-        print unsupervised_params
-        dbn_layout          = cPickle.load(saved_ann)
+        layer_params = cPickle.load(saved_ann)
+        ann_layout   = cPickle.load(saved_ann)
         saved_ann.close()
+        print layer_params
     else:
-        unsupervised_params = None
-        dbn_layout          = None
-
+        layer_params = None
+        ann_layout   = None
 
     # Load spectra as a data set. Train, validate and test
     # first check, whether we read data from a pickled file
@@ -90,25 +98,17 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
         size_out = cPickle.load(datafile)
     else:
         #datasets = load_data(dataset)
-        datasets, size, size_out = load_SDSS_data(args, 5000, wholespec=True, percentile = 100)
+        datasets, size, size_out = load_SDSS_data(args, 10000, reshape_2D = 0, wholespec=True, percentile = 100)
 
     train_set_x, train_set_y = datasets[0]
     valid_set_x, valid_set_y = datasets[1]
     test_set_x, test_set_y = datasets[2]
-
-    # EXPERIMENT:
-    ann_path = '/home/basti/SDSS_indie/Python/MachineLearning/stacked_networks/stacked_best_layer0.convmlp'
-    data_new_x = convert_flux_to_prediction(None, size, train_set_x, valid_set_x, test_set_x, ann_path = ann_path, mlp_flag = False)
-    ann_path = '/home/basti/SDSS_indie/Python/MachineLearning/stacked_networks/stacked_best_layer1.convmlp'
-    data_new_x = convert_flux_to_prediction(None, size, train_set_x, valid_set_x, test_set_x, ann_path = ann_path, mlp_flag = True)
-    train_set_x, valid_set_x, test_set_x = data_new_x
-    # :EXPERIMENT END
-    
     print test_set_x
     print test_set_y
 
     #TODO: the training data needs to be dust corrected and residual corrected!
 
+    rng = np.random.RandomState(23455)
 
     # compute number of minibatches for training, validation and testing
     n_train_batches = train_set_x.get_value(borrow=True).shape[0] / batch_size
@@ -128,72 +128,120 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
 
     print x.type, y.type
 
-    rng = numpy.random.RandomState(1234)
+    ######################
+    # BUILD ACTUAL MODEL #
+    ######################
+    print '... building the model'
 
-    # construct the MLP class
-    #mlp_layout = [size, n_hidden, size]
-    #mlp_layout = [size, 50, 500, 50, size]
-    #mlp_layout = [size, 1000, 2000, 60, size]
-    mlp_layout = [size, 11000, size_out]
-    if dbn_layout == None and unsupervised_params == None:
-        classifier = MLP(
-            rng=rng,
-            input=x,
-            activation=T.tanh,
-            ann_layout=mlp_layout
-        )
-    else:
-        print 'using previous network weights'
-        classifier = MLP(
-            rng=rng,
-            input=x,
-            activation=T.tanh,
-            #activation=T.nnet.sigmoid,
-            layer_params=unsupervised_params,
-            ann_layout=dbn_layout
-        )
+    # reshape input to match needed input shape
+    layer0_input = x.reshape((batch_size, 1, 44, 44))
+    #layer0_input = x.reshape((batch_size, 1, 24, 24))
+    print layer0_input.ndim
+    #layer0_input = layer0_input.dimshuffle(0, 1, 'x', 2)
+    print layer0_input.ndim
 
-    # start-snippet-4
-    # the cost we minimize during training is the negative log likelihood of
-    # the model plus the regularization terms (L1 and L2); cost is expressed
-    # here symbolically
+    # ann_layout: 
+    # 1st entry: number of convolutional layers
+    # rest: mlp_layout; 50*3*3 neurons on hidden layer, size = 576 neurons on output
+    # 50*3*3 is the number of outputs on the last convolutional layer calculated by
+    # nkerns[i-1] * ((image_size - filter_size + 1) / 2)**2 recursively over the 
+    # layers. In implementation for further details
+    #ann_layout   = (2, nkerns[-1]*3*3, 1000, 35, size)
+    #ann_layout   = (2, nkerns[-1]*8*8, 2500, 2000, size)
+    ann_layout   = (2, nkerns[-1]*8*8, 2000, 5000, size_out)
 
-    cost = (
-        #classifier.test(y)[-1]
-        classifier.prediction_error_sq(y)
-        # + L1_reg * classifier.L1
-        # + L2_reg * classifier.L2_sqr
+
+    # Stick together a network from several individually trained 'stacked_' networks
+    path_layer0 = '/home/basti/SDSS_indie/Python/MachineLearning/stacked_networks/stacked_best_layer0.convmlp'
+    path_layer1 = '/home/basti/SDSS_indie/Python/MachineLearning/stacked_networks/stacked_best_layer1.convmlp'
+    path_layer2 = '/home/basti/SDSS_indie/Python/MachineLearning/stacked_networks/stacked_best_layer2.convmlp'
+
+    layer0_file = open(path_layer0)
+    layer1_file = open(path_layer1)
+    layer2_file = open(path_layer2)
+
+    layer0_params = cPickle.load(layer0_file)
+    layer0_layout = cPickle.load(layer0_file)
+    layer0_file.close()
+
+    layer1_params = cPickle.load(layer1_file)
+    layer1_layout = cPickle.load(layer1_file)
+    layer1_file.close()
+
+    layer2_params = cPickle.load(layer2_file)
+    layer2_layout = cPickle.load(layer2_file)
+    layer2_file.close()
+
+    # create a list of the full layout and parameters
+    full_layout = []
+    full_layout.extend(layer0_layout)
+    # for the MLP 'layers' (= trained MLP networks), we need to neglect the first (=input) layer
+    # thus we extend with [1:]
+    full_layout.extend(layer1_layout[1:])
+    full_layout.extend(layer2_layout[1:])
+
+    # to stick together the full parameter list, we need to be a little careful to maintain the standard
+    # syntax. The LeNet pooling layers in one list []
+    full_params = []
+    full_params.extend(layer0_params[0])
+    full_params = [full_params]
+    # and then the MLP layers of the LeNet network (all stored in [1])
+    full_params.extend(layer0_params[1])
+    # and finally extend with the MLP parameters
+    full_params.extend(layer1_params)
+    full_params.extend(layer2_params)
+    # now we need to put the normal MLP layers into its own list, similarly to the pooling layers at the 
+    # beginning
+    full_params[1:] = [full_params[1:]]
+
+    classifier = LeNetConvNetwork(
+        rng=rng,
+        input=layer0_input,
+        filter0_shape=(nkerns[0], 1, 5, 5),
+        #image0_shape=(batch_size, 1, 24, 24),
+        image0_shape=(batch_size, 1, 44, 44),
+        poolsize=(2,2),
+        nkerns=nkerns,
+        ann_layout=full_layout,
+        activation = T.tanh,
+        layer_params = full_params
     )
 
-    print 'f', test_set_y[0:batch_size].shape[1].eval()#, test_set_y[0].eval()
-
-    # compiling a Theano function that computes the mistakes that are made
-    # by the model on a minibatch
+    # create a function to compute the mistakes that are made by the model
     test_model = theano.function(
-        inputs=[index],
-        outputs=classifier.prediction_error_sq(y),#classifier.errors(y, threshold=0.001),
+        [index],
+        classifier.prediction_error_sq(y),
         givens={
-            x: test_set_x[index * batch_size:(index + 1) * batch_size],
-            y: test_set_y[index * batch_size:(index + 1) * batch_size]
+            x: test_set_x[index * batch_size: (index + 1) * batch_size],
+            y: test_set_y[index * batch_size: (index + 1) * batch_size]
         }
     )
 
     validate_model = theano.function(
-        inputs=[index],
-        #outputs=[classifier.test(y)[-1],classifier.prediction_error_sq(y)],
-        outputs=classifier.prediction_error_sq(y),
+        [index],
+        #classifier.test(y)[-1],
+        classifier.prediction_error_sq(y),
         givens={
-            x: valid_set_x[index * batch_size:(index + 1) * batch_size],
-            y: valid_set_y[index * batch_size:(index + 1) * batch_size]
+            x: valid_set_x[index * batch_size: (index + 1) * batch_size],
+            y: valid_set_y[index * batch_size: (index + 1) * batch_size]
         }
     )
 
-    # start-snippet-5
-    # compute the gradient of cost with respect to theta (sotred in params)
-    # the resulting gradients will be stored in a list gparams
-    gparams = [T.grad(cost, param) for param in classifier.params]
-    gparams_pre = [T.grad(classifier.prediction_error_sq(y), param) for param in classifier.params]
+    # the cost we minimize during training is the negative log likelihood of
+    # the model plus the regularization terms (L1 and L2); cost is expressed
+    # here symbolically
+    cost = (
+        #classifier.test(y)[1]
+        classifier.prediction_error_sq(y)
+    )
 
+    print 'f', test_set_y[:].shape[1].eval()#, test_set_y[0].eval()
+
+    # create a list of all model parameters to be fit by gradient descent
+    params = classifier.params
+
+    # create a list of gradients for all model parameters
+    grads = T.grad(cost, params)
 
     # specify how to update the parameters of the model as a list of
     # (variable, update expression) pairs
@@ -202,40 +250,12 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
     # same length, zip generates a list C of same size, where each element
     # is a pair formed from the two lists :
     #    C = [(a1, b1), (a2, b2), (a3, b3), (a4, b4)]
-    # create symbolic varialbe lr (learning rate) to change the learning rate
-    # of the network during runtime
     lr = T.dscalar('lr')
     updates = [
-        (param, param - T.cast(
-                lr,
-                dtype=theano.config.floatX
-            ) * gparam)
-        for param, gparam in zip(classifier.params, gparams)
+        (param_i, param_i - T.cast(lr, dtype=theano.config.floatX) * grad_i)
+        for param_i, grad_i in zip(params, grads)
     ]
-
-    updates_pre = [
-        (param, param - T.cast(
-                lr,
-                dtype=theano.config.floatX
-            ) * gparam)
-        for param, gparam in zip(classifier.params, gparams_pre)
-    ]
-
-    pre_train_model = theano.function(
-        inputs=[index, theano.Param(lr, default=learning_rate)],
-        outputs=classifier.prediction_error_sq(y),
-        updates=updates_pre,
-        givens={
-            x: train_set_x[index * batch_size: (index + 1) * batch_size],
-            y: train_set_y[index * batch_size: (index + 1) * batch_size]
-        }
-    )
-
-    print 'pre training'
-    #cost_pre_train = numpy.mean([pre_train_model(i, lr=1) for i in xrange(100)])
-    #print 'cost of pre training (prediction_error_sq):', cost_pre_train
-
-
+    #updates = [(param_i, param_i) for param_i in params]
 
     # compiling a Theano function `train_model` that returns the cost, but
     # in the same time updates the parameter of the model based on the rules
@@ -249,6 +269,16 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
             y: train_set_y[index * batch_size: (index + 1) * batch_size]
         }
     )
+
+    # test = theano.function(
+    #     inputs=[index, theano.Param(lr, default=learning_rate)],
+    #     outputs=classifier.test(y),
+    #     updates=updates,
+    #     givens={
+    #         x: train_set_x[index * batch_size: (index + 1) * batch_size],
+    #         y: train_set_y[index * batch_size: (index + 1) * batch_size]
+    #     }
+    # )
     # end-snippet-5
 
     ###############
@@ -256,20 +286,9 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
     ###############
     print '... training'
 
-
-    test = theano.function(
-        inputs=[index],
-        outputs=classifier.test(y),
-        givens={
-            x: train_set_x[index * batch_size: (index + 1) * batch_size],
-            y: train_set_y[index * batch_size: (index + 1) * batch_size]
-        }
-    )
-
-
     # early-stopping parameters
-    patience = 2000000  # look as this many examples regardless
-    patience_increase = 4  # wait this much longer when a new best is
+    patience = 10000000  # look as this many examples regardless
+    patience_increase = 8  # wait this much longer when a new best is
                            # found
     improvement_threshold = 0.995  # a relative improvement of this much is
                                    # considered significant
@@ -280,7 +299,7 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
                                   # check every epoch
 
     best_params = None
-    best_validation_loss = numpy.inf
+    best_validation_loss = np.inf
     best_iter = 0
     test_score = 0.
     start_time = time.clock()
@@ -288,69 +307,58 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
     epoch = 0
     done_looping = False
     learning_0 = 1
-    #tau = 0.075
     tau = 0.05
     epoch_for_learning_rate = 0
-    
+
     train_cost_list = []
     valid_cost_list = []
-    valid2_cost_list= []
     test_cost_list  = []
 
     fig, axarr = plt.subplots(1)
     plt.show(block=False)
 
-    #learning_rate = learning_0 / (1 + tau * epoch)
-
     while (epoch < n_epochs) and (not done_looping):
         try:
-            #learning_rate = learning_0 * tau / (tau + epoch)
+            #learning_rate = learning_0 * tau / (tau + epoch) 
+            
             learning_rate = learning_0 / (1 + tau * epoch_for_learning_rate)
-            #learning_rate = 0.5
             print 'learning_rate for this epoch:', learning_rate
             epoch = epoch + 1
             epoch_for_learning_rate += 1
             train_avg_cost = []
 
             for minibatch_index in xrange(n_train_batches):
-
+                #a, b =  test(minibatch_index, learning_rate)
+                #print np.size(a), np.size(b), a, b
                 minibatch_avg_cost = train_model(minibatch_index, learning_rate)
-                #print test_model(minibatch_index)
                 train_avg_cost.append(minibatch_avg_cost)
-                #print 'train stuff', minibatch_avg_cost
-
+                #print 'train stuff', minibatch_avg_cost, epoch, minibatch_index
+                
+                assert np.isnan(minibatch_avg_cost) == False
                 # iteration number
                 iter = (epoch - 1) * n_train_batches + minibatch_index
                 if (iter + 1) % validation_frequency == 0:
-                    # add average train cost to list
-                    train_cost_list.append(numpy.mean(train_avg_cost))
                     # compute zero-one loss on validation set
-                    print 'train stuff', minibatch_avg_cost
-                    #print test(minibatch_index)[-1]
+                    train_cost_list.append(np.mean(train_avg_cost))
+                    print 'train stuff', train_cost_list[-1]
                     validation_losses = [validate_model(i) for i
                                          in xrange(n_valid_batches)]
-                    # this_validation_loss = numpy.mean(validation_losses[:][1])
-                    # this2_validation_loss =numpy.mean(validation_losses[:][0])
-                    this_validation_loss = numpy.mean(validation_losses)
-
+                    this_validation_loss = np.mean(validation_losses)
                     valid_cost_list.append(this_validation_loss)
-                    #valid2_cost_list.append(this2_validation_loss)
-
+                    
                     ########################################
                     ###### Perform some plotting ###########
                     ########################################
 
                     axarr.clear()
-                    axarr.plot(numpy.arange(len(train_cost_list)), train_cost_list)
-                    axarr.plot(numpy.arange(len(valid_cost_list)), valid_cost_list)
-                    #axarr.plot(numpy.arange(len(valid2_cost_list)), valid2_cost_list)
+                    axarr.plot(np.arange(len(train_cost_list)), train_cost_list)
+                    axarr.plot(np.arange(len(valid_cost_list)), valid_cost_list)
                     axarr.set_xlabel('Epoch / #')
                     axarr.set_ylabel('Test / Validation cost')
                     plt.draw()
-                    plt.savefig('CostPlots/mlp_cost_epochs.png')
                     time.sleep(0.1)
                     plt.pause(0.0001)   
-
+                    
                     print(
                         'epoch %i, minibatch %i/%i, validation error %f %%' %
                         (
@@ -377,15 +385,12 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
                         # test it on the test set
                         test_losses = [test_model(i) for i
                                        in xrange(n_test_batches)]
-                        test_score = numpy.mean(test_losses)
+                        test_score = np.mean(test_losses)
 
                         print(('     epoch %i, minibatch %i/%i, test error of '
                                'best model %f %%') %
                               (epoch, minibatch_index + 1, n_train_batches,
                                test_score * 100.))
-                    else:
-                        epoch_for_learning_rate += 1
-                        learning_rate = learning_0 / (1 + tau * epoch_for_learning_rate)
 
                 if patience <= iter:
                     print 'done looping', epoch, iter
@@ -395,7 +400,6 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
             # while network is being trained, check for KeyboardInterrupt
             # so that we can stop the training and save the network\
             # print infos
-
             continue_flag = raw_input(
                 'Do you really want to terminate the program?\n'
                 'If no, current networks will be saved, but program continues. (Y/n) '
@@ -408,13 +412,13 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
                 if save_flag in ['y','Y']:
                     print '...saving networks to unfinishedNetworks folder'
                     # cPickle networks (best and current)
-                    save_file = open('./unfinishedNetworks/classifier_params_unfinished.mlp', 'wb')
+                    save_file = open('./unfinishedNetworks/classifier_params_unfinished.convmlp', 'wb')
                     cPickle.dump(classifier.layer_params, save_file, -1)
-                    cPickle.dump(mlp_layout, save_file, -1)
+                    cPickle.dump(ann_layout, save_file, -1)
                     save_file.close()
-                    save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.mlp', 'wb')
+                    save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.convmlp', 'wb')
                     cPickle.dump(best_params, save_file, -1)
-                    cPickle.dump(mlp_layout, save_file, -1)
+                    cPickle.dump(ann_layout, save_file, -1)
                     save_file.close()
                     print '...networks saved'
                 import sys
@@ -422,13 +426,13 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
             else:
                 print '...saving networks to unfinishedNetworks folder'
                 # cPickle networks (best and current)
-                save_file = open('./unfinishedNetworks/classifier_params_unfinished.mlp', 'wb')
+                save_file = open('./unfinishedNetworks/classifier_params_unfinished.convmlp', 'wb')
                 cPickle.dump(classifier.layer_params, save_file, -1)
-                cPickle.dump(mlp_layout, save_file, -1)
+                cPickle.dump(ann_layout, save_file, -1)
                 save_file.close()
-                save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.mlp', 'wb')
+                save_file = open('./unfinishedNetworks/classifier_best_params_unfinished.convmlp', 'wb')
                 cPickle.dump(best_params, save_file, -1)
-                cPickle.dump(mlp_layout, save_file, -1)
+                cPickle.dump(ann_layout, save_file, -1)
                 save_file.close()
                 print '...networks saved'
                 learn_flag = raw_input(
@@ -453,16 +457,18 @@ def test_mlp(args, learning_rate=0, L1_reg=0.00, L2_reg=0.0000, n_epochs=250,
     # cPickle classifier (better to pickle weights only!)
     # to use in predicting and plotting script
     # first cPickle final model
-    save_file = open('classifier_params.mlp', 'wb')
+    save_file = open('classifier_params.convmlp', 'wb')
     cPickle.dump(classifier.layer_params, save_file, -1)
-    cPickle.dump(mlp_layout, save_file, -1)
+    cPickle.dump(ann_layout, save_file, -1)
     save_file.close()
     # now pickle model with best parameters
-    save_file = open('classifier_best_params.mlp', 'wb')
+    save_file = open('classifier_best_params.convmlp', 'wb')
     cPickle.dump(best_params, save_file, -1)
-    cPickle.dump(mlp_layout, save_file, -1)
+    cPickle.dump(ann_layout, save_file, -1)
     save_file.close()
+
+
 
 if __name__ == '__main__':
     import sys
-    test_mlp(sys.argv[1:])
+    evaluate_lenet5(sys.argv[1:])

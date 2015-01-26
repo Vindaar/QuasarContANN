@@ -287,6 +287,7 @@ class RBM(object):
         # end-snippet-4
 
     def get_pseudo_likelihood_cost(self, updates):
+
         """Stochastic approximation to the pseudo-likelihood"""
 
         # index of bit i in expression p(x_i | x_{\i})
